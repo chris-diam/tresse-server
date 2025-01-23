@@ -1,16 +1,54 @@
-const express = require("express");
-const router = express.Router();
+const cloudinary = require("cloudinary").v2;
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const multer = require("multer");
-const path = require("path");
+// const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const express = require("express");
 const Product = require("../models/Product");
+const router = express.Router();
+require("dotenv").config();
 
-// Configure multer for file upload
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads/");
-  },
-  filename: function (req, file, cb) {
-    cb(null, `${Date.now()}-${file.originalname}`);
+const stripe = require("stripe")(
+  "sk_test_51QkQtc04gROXO8AyM4WV2iPMQLn6KE1eEzOYtWt8xfKqT1Wk1lSuJEFxI8FSyXTN8gYmHHLLBKZhJIjIxM5GTMK500z0EiP2ly"
+);
+
+// Debug logging for Cloudinary config
+console.log("Starting Cloudinary configuration...");
+console.log("Environment variables present:", {
+  cloud_name: !!process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: !!process.env.CLOUDINARY_API_KEY,
+  api_secret: !!process.env.CLOUDINARY_API_SECRET,
+});
+
+// Cloudinary configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dbs2aceeu",
+  api_key: process.env.CLOUDINARY_API_KEY || "436145576797981",
+  api_secret:
+    process.env.CLOUDINARY_API_SECRET || "7quyh76MYhorrh5DabG-vcWm0lI",
+});
+
+// Verify configuration
+console.log(
+  "Cloudinary configured with cloud_name:",
+  cloudinary.config().cloud_name
+);
+
+// Configure multer to use Cloudinary
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: "products",
+    allowed_formats: ["jpg", "jpeg", "png", "webp"],
+    transformation: [
+      {
+        width: 800,
+        height: 800,
+        crop: "auto",
+        gravity: "auto",
+        fetch_format: "auto",
+        quality: "auto",
+      },
+    ],
   },
 });
 
@@ -18,19 +56,6 @@ const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit
-  },
-  fileFilter: function (req, file, cb) {
-    const filetypes = /jpeg|jpg|png|webp/;
-    const extname = filetypes.test(
-      path.extname(file.originalname).toLowerCase()
-    );
-    const mimetype = filetypes.test(file.mimetype);
-
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb("Error: Images only!");
-    }
   },
 });
 
@@ -40,31 +65,55 @@ router.get("/", async (req, res) => {
     const products = await Product.find({});
     res.json(products);
   } catch (error) {
+    console.error("Error fetching products:", error);
     res.status(500).json({ message: error.message });
   }
 });
 
 // Create a new product with image upload
-router.post("/", upload.single("image"), async (req, res) => {
-  try {
-    const { title, price, category, description } = req.body;
+router.post(
+  "/",
+  upload.fields([
+    { name: "mainImage", maxCount: 1 },
+    { name: "sideImages", maxCount: 3 },
+  ]),
+  async (req, res) => {
+    try {
+      if (!req.files.mainImage || !req.files.sideImages) {
+        return res.status(400).json({ message: "All images required" });
+      }
 
-    if (!req.file) {
-      return res.status(400).json({ message: "Please upload an image" });
+      const product = new Product({
+        title: req.body.title,
+        price: req.body.price,
+        category: req.body.category,
+        description: req.body.description,
+        images: {
+          main: req.files.mainImage[0].path,
+          side: req.files.sideImages.map((file) => file.path),
+        },
+      });
+
+      const savedProduct = await product.save();
+      res.status(201).json(savedProduct);
+    } catch (error) {
+      res.status(400).json({ message: error.message });
     }
+  }
+);
 
-    const product = new Product({
-      title,
-      price,
-      category,
-      description,
-      imageUrl: `/uploads/${req.file.filename}`,
+router.post("/api/create-payment-intent", async (req, res) => {
+  const { amount } = req.body;
+
+  try {
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount,
+      currency: "usd",
     });
 
-    const savedProduct = await product.save();
-    res.status(201).json(savedProduct);
+    res.status(200).json({ clientSecret: paymentIntent.client_secret });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -77,6 +126,7 @@ router.get("/:id", async (req, res) => {
     }
     res.json(product);
   } catch (error) {
+    console.error("Error fetching single product:", error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -84,23 +134,38 @@ router.get("/:id", async (req, res) => {
 // Update product
 router.put("/:id", upload.single("image"), async (req, res) => {
   try {
+    console.log("Update request received for product:", req.params.id);
+    console.log("Update data:", req.body);
+
     const { title, price, category, description } = req.body;
     const updateData = { title, price, category, description };
 
     if (req.file) {
-      updateData.imageUrl = `/uploads/${req.file.filename}`;
+      console.log("New image file received:", req.file);
+      updateData.imageUrl = req.file.path;
+
+      const product = await Product.findById(req.params.id);
+      if (product && product.imageUrl) {
+        const publicId = product.imageUrl.split("/").slice(-1)[0].split(".")[0];
+        console.log("Deleting old image with public ID:", publicId);
+        await cloudinary.uploader.destroy(publicId);
+      }
     }
 
-    const product = await Product.findByIdAndUpdate(req.params.id, updateData, {
-      new: true,
-    });
+    const updatedProduct = await Product.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true }
+    );
 
-    if (!product) {
+    if (!updatedProduct) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    res.json(product);
+    console.log("Product updated successfully:", updatedProduct);
+    res.json(updatedProduct);
   } catch (error) {
+    console.error("Error updating product:", error);
     res.status(400).json({ message: error.message });
   }
 });
@@ -108,12 +173,25 @@ router.put("/:id", upload.single("image"), async (req, res) => {
 // Delete product
 router.delete("/:id", async (req, res) => {
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
+    console.log("Delete request received for product:", req.params.id);
+
+    const product = await Product.findById(req.params.id);
+
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
+
+    if (product.imageUrl) {
+      const publicId = product.imageUrl.split("/").slice(-1)[0].split(".")[0];
+      console.log("Deleting image with public ID:", publicId);
+      await cloudinary.uploader.destroy(publicId);
+    }
+
+    await Product.findByIdAndDelete(req.params.id);
+    console.log("Product deleted successfully");
     res.json({ message: "Product deleted" });
   } catch (error) {
+    console.error("Error deleting product:", error);
     res.status(500).json({ message: error.message });
   }
 });

@@ -6,10 +6,13 @@ require("dotenv").config();
 
 const app = express();
 
-// CORS configuration
+// Check CORS configuration in server.js
 app.use(
   cors({
-    origin: "*", // In production, you should specify your actual frontend domain
+    origin: [
+      "http://localhost:5174",
+      "https://tresse.netlify.app", // Add your Netlify domain
+    ],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
