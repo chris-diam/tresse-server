@@ -106,12 +106,19 @@ router.post(
 
 router.post("/create-checkout-session", async (req, res) => {
   try {
+    const { amount } = req.body;
+    
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: req.body.amount,
-      currency: "eur",
+      amount,
+      currency: 'eur',
+      automatic_payment_methods: {
+        enabled: true,
+      },
     });
+
     res.json({ clientSecret: paymentIntent.client_secret });
   } catch (error) {
+    console.error('Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
